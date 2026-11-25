@@ -557,6 +557,15 @@ def rule_map(fields, resume, candidate_profile):
             if aliases not in alias_lists:
                 alias_lists.append(aliases)
 
+        # FIX-7: prefixed labels ("Please indicate your nationality",
+        # "Your current location") never equal a canonical alias key
+        # exactly, so the profile value stayed unused. Add conservative
+        # whole-word embedded matches on top of the exact keys.
+        for key in app_ut.find_embedded_alias_keys(label, field_name, field_id):
+            aliases = app_ut.FIELD_ALIASES.get(key)
+            if aliases and aliases not in alias_lists:
+                alias_lists.append(aliases)
+
         def lookup_value(flat_data):
             """First non-empty value across alias lists (priority order)."""
             for aliases in alias_lists:
@@ -586,10 +595,50 @@ def rule_map(fields, resume, candidate_profile):
 
         elif app_ut.requires_manual_answer(field):
 
-            manual_required = True
-            manual_reason = (
-                "Declarative/eligibility question — candidate must answer."
-            )
+            # FIX-6: the declarative regex also matches notice-period /
+            # salary labels, which forced these fields to manual even when
+            # the candidate profile provides them. If the label resolves to
+            # a profile-backed alias key AND a value exists (matching the
+            # options for selects), map it instead of forcing manual.
+            _backed = None
+            _backed_source = None
+            for _key in candidate_keys:
+                if _key not in app_ut.PROFILE_BACKED_KEYS:
+                    continue
+                _aliases = app_ut.FIELD_ALIASES.get(_key) or [_key]
+                _v = app_ut.get_source_value(candidate_data, _aliases)
+                if _v is not None:
+                    _backed, _backed_source = _v, "candidate_profile"
+                    break
+                _v = app_ut.get_source_value(resume_data_flat, _aliases)
+                if _v is not None:
+                    _backed, _backed_source = _v, "resume"
+                    break
+
+            if (
+                _backed is not None
+                and (
+                    field_type in app_ut._SELECT_TYPES
+                    or app_ut._is_checkbox_type(field_type)
+                )
+                and field.get("options")
+            ):
+                _opt = app_ut.match_option(field.get("options"), _backed)
+                if _opt is None:
+                    _backed = None
+                elif _opt.get("value") not in (None, ""):
+                    _backed = _opt.get("value")
+                else:
+                    _backed = _opt.get("label") or _opt.get("text")
+
+            if _backed is not None:
+                value = _backed
+                value_source = _backed_source
+            else:
+                manual_required = True
+                manual_reason = (
+                    "Declarative/eligibility question — candidate must answer."
+                )
 
         else:
 
@@ -608,7 +657,7 @@ def rule_map(fields, resume, candidate_profile):
                 "country code" in _label_norm
                 and (
                     field_type in app_ut._SELECT_TYPES
-                    or app_ut.canonical_key in ("phone_country_code", "country_code")
+                    or app_ut.canonical(field_name or field_id) in ("phone_country_code", "country_code")
                     or "country" in _name_or_id
                 )
             )

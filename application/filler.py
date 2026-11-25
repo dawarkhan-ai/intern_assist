@@ -1232,40 +1232,76 @@ def fill(page, mapped_output, resume_path=None, config=None):
                 "status": "selected_unverified",
             })
 
-            page.wait_for_function(
-                """(sel) => {
-                    const name = document.querySelector(sel.nameSel);
-                    const link = document.querySelector(sel.linkSel);
-
-                    return name?.textContent.trim() && link?.getAttribute('href');
-                }""",
-                arg={
-                    "nameSel": cfg["uploaded_file_name"],
-                    "linkSel": cfg["download_file_link"],
-                },
-                timeout=cfg["upload_verify_timeout_ms"],
+            # FIX-3: the portal-specific verification selectors only
+            # exist on Internshala-style markup. On generic ATS forms
+            # (Lever/Greenhouse/Ashby) fall back to verifying that the
+            # file is still retained by the input instead of timing out
+            # for 15s and reporting selected_unverified.
+            portal_specific = (
+                page.locator(cfg["uploaded_file_name"]).count() > 0
+                or page.locator(cfg["download_file_link"]).count() > 0
             )
 
-            uploaded_name = page.locator(
-                cfg["uploaded_file_name"]
-            ).first.inner_text().strip()
+            if portal_specific:
 
-            if (
-                app_ut._norm(uploaded_name) != app_ut._norm(path.name)
-                and path.name not in uploaded_name
-            ):
+                page.wait_for_function(
+                    """(sel) => {
+                        const name = document.querySelector(sel.nameSel);
+                        const link = document.querySelector(sel.linkSel);
 
-                raise RuntimeError(
-                    f"Uploaded filename mismatch: {uploaded_name}"
+                        return name?.textContent.trim() && link?.getAttribute('href');
+                    }""",
+                    arg={
+                        "nameSel": cfg["uploaded_file_name"],
+                        "linkSel": cfg["download_file_link"],
+                    },
+                    timeout=cfg["upload_verify_timeout_ms"],
                 )
 
-            result.update({
-                "status": "uploaded",
-                "success": True,
-                "upload_verified": True,
-                "filename": uploaded_name,
-                "reason": "Website upload verified.",
-            })
+                uploaded_name = page.locator(
+                    cfg["uploaded_file_name"]
+                ).first.inner_text().strip()
+
+                if (
+                    app_ut._norm(uploaded_name) != app_ut._norm(path.name)
+                    and path.name not in uploaded_name
+                ):
+
+                    raise RuntimeError(
+                        f"Uploaded filename mismatch: {uploaded_name}"
+                    )
+
+                result.update({
+                    "status": "uploaded",
+                    "success": True,
+                    "upload_verified": True,
+                    "filename": uploaded_name,
+                    "reason": "Website upload verified.",
+                })
+
+            else:
+
+                page.wait_for_timeout(1500)
+
+                retained = file_input.evaluate(
+                    "el => el.files?.length ? el.files[0].name : null"
+                )
+
+                if retained != path.name:
+
+                    raise RuntimeError(
+                        "Browser did not retain selected resume."
+                    )
+
+                result.update({
+                    "status": "uploaded",
+                    "success": True,
+                    "upload_verified": True,
+                    "reason": (
+                        "Generic verification: file retained in input "
+                        "(portal-specific upload widget not detected)."
+                    ),
+                })
 
         except Exception as exc:
 
@@ -1306,6 +1342,13 @@ def fill(page, mapped_output, resume_path=None, config=None):
         if field.get("id") is not None
     }
 
+    # FIX-8: the same field could reach the manual report twice — once
+    # from this init loop and once from the fill loop below (mapped
+    # fields carrying manual_required=True), and merge() only dedupes by
+    # (id, label) which misses id=None pairs across sources. Track a
+    # normalized key so every field is reported exactly once.
+    reported_manual_keys = set()
+
     for field in manual_fields:
 
         # Already handled through mapped fields
@@ -1314,6 +1357,16 @@ def fill(page, mapped_output, resume_path=None, config=None):
             and str(field.get("id")) in mapped_ids
         ):
             continue
+
+        _mkey = (
+            str(field.get("id")),
+            app_ut._norm(field.get("label") or ""),
+        )
+
+        if _mkey in reported_manual_keys:
+            continue
+
+        reported_manual_keys.add(_mkey)
 
         add_status(
             "manual_required",
@@ -1410,12 +1463,17 @@ def fill(page, mapped_output, resume_path=None, config=None):
 
         if manual_required and value is None:
 
-            add_status(
-                "manual_required",
-                label,
-                value,
-                "Candidate input required."
-            )
+            # FIX-8: skip if the init loop already reported this field
+            _mkey = (str(field.get("id")), label_n)
+
+            if _mkey not in reported_manual_keys:
+                reported_manual_keys.add(_mkey)
+                add_status(
+                    "manual_required",
+                    label,
+                    value,
+                    "Candidate input required."
+                )
 
             continue
 

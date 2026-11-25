@@ -417,10 +417,18 @@ PARSE_JS = r"""
     // Match those by URL so they are not lost.
     const APPLY_HREF_RE = /\/apply([\/?#]|$)/i;
 
+    // FIX-9 (found during live testing on Internshala): FAQ lines like
+    // "Q. How do I apply for this internship?" and "What is the last date
+    // to apply..." contain the word "apply" but are informational, not
+    // CTAs. A question-mark ending or "date to apply" / "how do I apply"
+    // phrasing excludes them. Unambiguous /apply hrefs still win.
+    const FAQ_RE =
+        /\b(last\s+date\s+to\s+apply|how\s+(do\s+i|can\s+i|to)\s+apply)\b|\?\s*$/i;
+
     const apply_actions = (data.raw_actions || []).filter(({ text, url }) => {
         const t = (text || '').trim();
-        if (APPLY_RE.test(t) && !FALSE_POS_RE.test(t)) return true;
-        return !!url && APPLY_HREF_RE.test(url);
+        if (!!url && APPLY_HREF_RE.test(url)) return true;
+        return APPLY_RE.test(t) && !FALSE_POS_RE.test(t) && !FAQ_RE.test(t);
     });
 
     // 10. Output

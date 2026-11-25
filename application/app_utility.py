@@ -1173,6 +1173,55 @@ def canonical(value):
     }
     return synonyms.get(s, s)
 
+
+# FIX-6: declarative-looking labels that are actually backed by real
+# profile data may be auto-mapped when the profile provides a value.
+# Sensitive declarations (gender, race, veteran, sponsorship, consent...)
+# are deliberately NOT in this set.
+PROFILE_BACKED_KEYS = {
+    "notice_period",
+    "salary_expectation",
+    "relocate",
+    "years_of_experience",
+}
+
+
+# FIX-7: exact canonical keys miss prefixed labels like "Please indicate
+# your nationality". Whole-word token-subsequence matching recovers the
+# alias key conservatively: multi-token keys are always allowed,
+# single-token keys only from a safe set (generic words like "name" or
+# "title" would over-match into the GENERIC_GUARDS territory).
+_SAFE_SINGLE_TOKEN_ALIASES = {
+    "location", "portfolio", "github", "linkedin", "email",
+    "phone", "dob", "nationality", "education", "gender",
+}
+
+
+def find_embedded_alias_keys(label, name=None, field_id=None):
+    """FIELD_ALIASES keys that appear as whole-word token subsequences
+    inside a longer label/name/id."""
+    text = _alias_norm(" ".join(
+        str(x) for x in (label, name, field_id) if x
+    ))
+    tokens = text.split()
+    if not tokens:
+        return []
+    out = []
+    for key in FIELD_ALIASES:
+        ktokens = key.split("_")
+        if len(ktokens) >= 2:
+            allowed = True
+        else:
+            allowed = ktokens[0] in _SAFE_SINGLE_TOKEN_ALIASES
+        if not allowed:
+            continue
+        n = len(ktokens)
+        for i in range(len(tokens) - n + 1):
+            if tokens[i:i + n] == ktokens:
+                out.append(key)
+                break
+    return out
+
 # ==========================================
 # 9. PROFILE / RESUME DATA HELPERS
 # ==========================================
@@ -1262,6 +1311,48 @@ def get_source_value(flat, aliases):
 # 10. APPLY BUTTON HANDLING
 # ==========================================
 
+# FIX-4: overlay modals (Internshala's subscription_alert, cookie walls,
+# job-alert popups) intercept pointer events and make the Apply click
+# time out. Best-effort dismissal + retry + DOM-level click fallback.
+_MODAL_CLOSE_SELECTORS = [
+    "[class*='modal'] [class*='close']",
+    "[class*='modal'] button[aria-label='Close']",
+    "button[aria-label='Close']",
+    "[data-dismiss='modal']",
+    "[class*='modal'] .cross",
+    "[class*='popup'] [class*='close']",
+    "[aria-label='Close dialog']",
+]
+
+
+def dismiss_blocking_popups(page):
+    """Try Escape + common close controls. True if anything was closed."""
+    dismissed = False
+
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    for sel in _MODAL_CLOSE_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            for i in range(min(loc.count(), 3)):
+                cand = loc.nth(i)
+                if cand.is_visible():
+                    try:
+                        cand.click(timeout=1500)
+                        page.wait_for_timeout(300)
+                        dismissed = True
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    return dismissed
+
+
 def click_apply_button(page, apply_actions):
 
     if not apply_actions:
@@ -1319,10 +1410,23 @@ def click_apply_button(page, apply_actions):
     if not locator.is_enabled():
         return False
 
-    # Click
-    locator.click(timeout=10000)
+    # FIX-4: dismiss overlay popups first; if the click still fails
+    # because something intercepts pointer events, retry once after
+    # another dismissal, and finally fall back to a DOM-level click
+    # (a synthetic el.click() is not blocked by overlays).
+    dismiss_blocking_popups(page)
 
-    return True
+    try:
+        locator.click(timeout=10000)
+        return True
+    except Exception:
+        dismiss_blocking_popups(page)
+        try:
+            locator.click(timeout=5000)
+            return True
+        except Exception:
+            locator.evaluate("el => el.click()")
+            return True
 
 
 # ==========================================
@@ -1387,8 +1491,13 @@ def click_next_button(page, button_data,logger):
             return False
 
         # Capture current page state
+        # FIX-9: count only VISIBLE fields — multi-step same-page forms
+        # keep every step's fields in the DOM (hidden), so a total DOM
+        # count never changes and the transition was never detected.
         old_url = page.url
-        old_fields = page.locator("input, select, textarea").count()
+        old_fields = page.locator(
+            "input:visible, select:visible, textarea:visible"
+        ).count()
 
         # Click button
         button.click(timeout=10000)
@@ -1409,11 +1518,15 @@ def click_next_button(page, button_data,logger):
 
         # Check current page state
         new_url = page.url
-        new_fields = page.locator("input, select, textarea").count()
+        new_fields = page.locator(
+            "input:visible, select:visible, textarea:visible"
+        ).count()
 
-        # Check HTML validation
+        # Check HTML validation (visible fields only — hidden required
+        # inputs of inactive form steps must not block the transition)
         invalid_fields = page.locator(
-            "input:invalid, select:invalid, textarea:invalid"
+            "input:invalid:visible, select:invalid:visible, "
+            "textarea:invalid:visible"
         )
         invalid_count = invalid_fields.count()
 

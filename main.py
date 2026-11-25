@@ -69,7 +69,10 @@ def main():
             logger.info("apply button clicked.")
 
             resume_path="user_config/temp_resume.pdf"
-            run_application_flow(page, resume_data, candidate_profile,logger, resume_path=None, max_pages=15)
+            # FIX-2: resume_path was hardcoded to None here, so the
+            # resume-upload flow never triggered even though the path
+            # was prepared just above. Pass the real path through.
+            run_application_flow(page, resume_data, candidate_profile,logger, resume_path=resume_path, max_pages=15)
             logger.info("Application submission is successfully done.")
 
             ##4. Resources cleanup
