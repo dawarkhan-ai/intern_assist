@@ -1,6 +1,6 @@
 .env
 user_config/
 venv/
-workflow
-models_test
+workflow.docx
+models_test.docx
 __pycache__/
